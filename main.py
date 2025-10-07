@@ -101,7 +101,7 @@ if uploaded_file is not None:
         st.subheader("Etapa 5: Resultado Final")
         texto_extraido_total = "\n".join([text for (bbox, text, prob) in results_filtered])
         st.text_area("Texto Extraído Completo", texto_extraido_total, height=200)
-        tempo_total = time.time() - tempo_start_total
+        tempo_total = time.time() - st.session_state['tempo_start_total'] 
         st.success(f"Tempo Total de Processamento: {tempo_total:.3f} segundos")
 
         # log de desempenho
@@ -111,10 +111,9 @@ if uploaded_file is not None:
             "Threshold BBox": bbox_threshold,
             "Número de Resultados": len(results_filtered),
             "Tempos por Etapa": {
-                "1 - Original": "Instantâneo",
-                "2 - Pré-processamento": "Rápido (manual)",
-                "3-4 - OCR Completo": f"{tempo_fim - tempo_inicio:.3f}s",
-                "Total": f"{tempo_total:.3f}s"
+                "2 - Pré-processamento": f"{tempo_fim_2 - tempo_inicio_2:.3f}s",
+                "3-4 - OCR Completo": f"{tempo_fim_ocr - tempo_inicio_ocr:.3f}s",
+                "Total (Desde o clique)": f"{tempo_total:.3f}s"
             }
         })
 
