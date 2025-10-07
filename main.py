@@ -101,7 +101,7 @@ if uploaded_file is not None:
         st.subheader("Etapa 5: Resultado Final")
         texto_extraido_total = "\n".join([text for (bbox, text, prob) in results_filtered])
         st.text_area("Texto Extraído Completo", texto_extraido_total, height=200)
-        tempo_total = time.time() - tempo_inici
+        tempo_total = time.time() - tempo_start_total
         st.success(f"Tempo Total de Processamento: {tempo_total:.3f} segundos")
 
         # log de desempenho
