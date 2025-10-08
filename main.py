@@ -15,6 +15,7 @@ from google.cloud.documentai_v1 import (
 )
 from google.cloud.documentai_v1.types import ProcessOptions, OcrConfig
 from google.oauth2 import service_account
+from google.api_core.client_options import ClientOptions
 
 # Carregamento exclusivo de secrets.toml (sem dotenv ou os.environ)
 try:
@@ -60,15 +61,12 @@ def get_credentials():
     # Tenta Secret Manager primeiro (com timeout e endpoint regional para prod)
     try:
         # Config client para prod: endpoint 'us' (ajuste se sua região for diferente), timeout 120s
-        client_options = {
-            "api_endpoint": "us-secretmanager.googleapis.com",  # Regional para reduzir latência
-            "timeout": 120.0  # Aumenta de 60s para 120s (evita 504)
-        }
+        client_options = ClientOptions(api_endpoint="us-secretmanager.googleapis.com")
         client = secretmanager.SecretManagerServiceClient(client_options=client_options)
         name = f"projects/{project_numeric}/secrets/DocumentAiTeste/versions/latest"
         print(f"🔍 Tentando acessar secret: {name} (timeout: 120s)")
-        
-        response = client.access_secret_version(request={"name": name})
+
+        response = client.access_secret_version(request={"name": name}, timeout=120.0)
         credentials_info = json.loads(response.payload.data.decode("UTF-8"))
         
         # Validação
