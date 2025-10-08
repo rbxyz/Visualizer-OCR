@@ -41,7 +41,6 @@ try:
     # PROJECT_ID para API (numeric)
     PROJECT_ID = PROJECT_ID_NUMERIC
 
-    st.sidebar.success("✅ Secrets.toml carregado com sucesso!")
 except KeyError as e:
     st.error(f"❌ Erro no secrets.toml: Chave '{e}' não encontrada. Verifique o arquivo .streamlit/secrets.toml ou o dashboard de produção.")
     st.stop()
