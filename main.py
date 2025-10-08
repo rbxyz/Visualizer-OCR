@@ -48,8 +48,81 @@ except Exception as e:
     st.error(f"❌ Erro ao carregar secrets.toml: {e}. Certifique-se de que o arquivo está no local correto (.streamlit/secrets.toml).")
     st.stop()
 
-# puxar credenciais do secret manager (ajustada para usar variáveis de secrets.toml)
+# puxar credenciais do secret manager
 def get_credentials():
+    """Carrega credenciais do Secret Manager com fallback para arquivo/TOML (prod-friendly)."""
+    # Usa variáveis globais de secrets.toml
+    project_numeric = PROJECT_ID_NUMERIC
+    project_string = PROJECT_ID_STRING
+    print(f"🔍 Projeto Numérico (para API): {project_numeric}")
+    print(f"🔍 Projeto String (para SA JSON): {project_string}")
+
+    # Tenta Secret Manager primeiro (com timeout e endpoint regional para prod)
+    try:
+        # Config client para prod: endpoint 'us' (ajuste se sua região for diferente), timeout 120s
+        client_options = {
+            "api_endpoint": "us-secretmanager.googleapis.com",  # Regional para reduzir latência (use 'secretmanager.googleapis.com' para global)
+            "timeout": 120.0  # Aumenta de 60s para 120s (evita 504)
+        }
+        client = secretmanager.SecretManagerServiceClient(client_options=client_options)
+        name = f"projects/{project_numeric}/secrets/DocumentAiTeste/versions/latest"
+        print(f"🔍 Tentando acessar secret: {name} (timeout: 120s)")
+        
+        response = client.access_secret_version(request={"name": name})
+        credentials_info = json.loads(response.payload.data.decode("UTF-8"))
+        
+        # Validação
+        if credentials_info.get("project_id") != project_string:
+            raise ValueError(
+                f"❌ Mismatch de Project ID no secret! JSON tem '{credentials_info.get('project_id')}', "
+                f"mas esperado: '{project_string}'. Verifique o JSON da SA."
+            )
+        
+        print("✅ Credenciais carregadas do Secret Manager com sucesso (Project ID validado).")
+        return credentials_info
+    
+    except Exception as sm_error:
+        error_msg = str(sm_error)
+        print(f"⚠️ Erro no Secret Manager: {error_msg} (código: {getattr(sm_error, 'code', 'unknown')})")
+        
+        if "504" in error_msg or "DEADLINE_EXCEEDED" in error_msg:
+            print("🔍 Detectado timeout 504 – comum em prod por latência. Tentando fallback.")
+        elif "PERMISSION_DENIED" in error_msg:
+            raise Exception(f"❌ Permissões insuficientes para Secret Manager. Adicione 'Secret Manager Secret Accessor' à SA no IAM.")
+        
+        # Fallback 1: Arquivo local (para dev)
+        json_path = GOOGLE_APPLICATION_CREDENTIALS
+        if json_path and os.path.exists(json_path):
+            try:
+                with open(json_path, "r") as f:
+                    credentials_info = json.load(f)
+                if credentials_info.get("project_id") != project_string:
+                    raise ValueError(f"❌ Mismatch no fallback JSON! Esperado: '{project_string}'.")
+                print(f"✅ Credenciais carregadas do arquivo local: {json_path}.")
+                return credentials_info
+            except Exception as fallback_e:
+                print(f"❌ Erro no fallback local: {fallback_e}")
+        
+        # Fallback 2: JSON direto do secrets.toml (para prod – novo!)
+        try:
+            sa_json_str = st.secrets["google"]["service_account_json"]
+            credentials_info = json.loads(sa_json_str)
+            if credentials_info.get("project_id") != project_string:
+                raise ValueError(f"❌ Mismatch no fallback TOML! Esperado: '{project_string}'.")
+            print("✅ Credenciais carregadas diretamente do secrets.toml (fallback prod).")
+            return credentials_info
+        except (KeyError, json.JSONDecodeError) as toml_e:
+            print(f"❌ Fallback TOML falhou: {toml_e}. Adicione 'service_account_json' no secrets.toml.")
+        
+        # Se todos falharem
+        raise Exception(
+            f"❌ Falha total no carregamento de credenciais. Erro principal: {error_msg}\n"
+            f"💡 1. Verifique permissões IAM: 'Secret Manager Secret Accessor' no projeto {project_numeric}.\n"
+            f"💡 2. Em prod: Adicione 'service_account_json' no secrets.toml com o JSON da SA.\n"
+            f"💡 3. Teste CLI: gcloud secrets versions access latest --secret=DocumentAiTeste --project=marcaai-469014\n"
+            f"💡 4. Se timeout persistir, use endpoint regional no client (ex: us-secretmanager.googleapis.com)."
+        )
+     
     """Carrega credenciais do Secret Manager com fallback para arquivo local."""
     # Usa variáveis globais de secrets.toml
     project_numeric = PROJECT_ID_NUMERIC
