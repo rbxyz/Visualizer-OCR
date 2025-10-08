@@ -150,7 +150,8 @@ def get_credentials():
             print(f"❌ Arquivo falhou: {file_e}")
 
     # Se chegar aqui em local: Erro total
-    raise Exception("❌ Nenhum fallback funcionou em local. Verifique arquivo ou secret.")    """Carrega credenciais: Prioriza TOML em prod, Secret Manager/arquivo em local."""
+    raise Exception("❌ Nenhum fallback funcionou em local. Verifique arquivo ou secret.")    
+    """Carrega credenciais: Prioriza TOML em prod, Secret Manager/arquivo em local."""
     project_numeric = PROJECT_ID_NUMERIC
     project_string = PROJECT_ID_STRING
     print(f"🔍 Projeto Numérico (para API): {project_numeric}")
