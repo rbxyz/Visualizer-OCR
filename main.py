@@ -342,8 +342,6 @@ else:
                 vertices = getattr(bpoly, "normalized_vertices", None)
                 if vertices and len(vertices) >= 2:
                     x_coords = [v.x * width for v in vertices]
-                                    if vertices and len(vertices) >= 2:
-                    x_coords = [v.x * width for v in vertices]
                     y_coords = [v.y * height for v in vertices]
                 else:
                     abs_vertices = getattr(bpoly, "vertices", None)
