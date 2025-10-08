@@ -19,6 +19,18 @@ from google.oauth2 import service_account
 
 load_dotenv()
 
+APP_EMAIL = st.secrets["app"]["email"]
+APP_PASSWORD = st.secrets["app"]["password"]
+TEST_EMAIL = st.secrets["app"]["test"]["email"]
+TEST_PASSWORD = st.secrets["app"]["test"]["password"]
+TEST_USAGE_LIMIT = st.secrets["app"]["test"]["usage_limit"]
+USAGE_LIMIT = st.secrets["app"]["usage_limit"]
+PROJECT_ID_NUMERIC = st.secrets["google"]["project_id_numeric"]
+PROJECT_ID_STRING = st.secrets["google"]["project_id_string"]
+LOCATION = st.secrets["google"]["location"]
+PROCESSOR_ID = st.secrets["google"]["processor_id"]
+GOOGLE_APPLICATION_CREDENTIALS = st.secrets["google"]["application_credentials_path"]
+
 # Defina PROJECT_ID cedo para get_credentials() (com fallback)
 PROJECT_ID = os.environ.get("PROJECT_ID", "811447882024")
 
