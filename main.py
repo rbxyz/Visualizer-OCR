@@ -49,8 +49,90 @@ except Exception as e:
     st.error(f"❌ Erro ao carregar secrets.toml: {e}. Certifique-se de que o arquivo está no local correto (.streamlit/secrets.toml).")
     st.stop()
 
-# puxar credenciais do secret manager (versão única e corrigida: timeout, fallback TOML com debug)
+# puxar credenciais do secret manager
 def get_credentials():
+    """Carrega credenciais: Prioriza TOML em prod, Secret Manager/arquivo em local."""
+    project_numeric = PROJECT_ID_NUMERIC
+    project_string = PROJECT_ID_STRING
+    print(f"🔍 Projeto Numérico (para API): {project_numeric}")
+    print(f"🔍 Projeto String (para SA JSON): {project_string}")
+
+    # Detecção de Ambiente: Se arquivo local não existe, assume prod e força TOML (evita ADC timeout)
+    json_path = GOOGLE_APPLICATION_CREDENTIALS
+    is_local = os.path.exists(json_path) if json_path else False
+    print(f"🔍 Ambiente detectado: {'Local (arquivo existe)' if is_local else 'Prod (forçando TOML)'}")
+
+    if not is_local:
+        print("🔍 Prod detectado – pulando ADC/Secret Manager e indo direto para fallback TOML.")
+        # Fallback direto: TOML (sem try Secret Manager)
+        try:
+            sa_json_str = st.secrets["google"]["service_account_json"]
+            print(f"🔍 TOML string length: {len(sa_json_str)}")
+            credentials_info = json.loads(sa_json_str)
+            print(f"🔍 TOML parseado: project_id = '{credentials_info.get('project_id')}'")
+            private_key_preview = credentials_info.get('private_key', '')[:60]  # Preview seguro
+            print(f"🔍 Private key preview: {private_key_preview}... (começa com -----BEGIN?) {'Sim' if private_key_preview.startswith('-----BEGIN') else 'NÃO – erro PEM!'}")
+
+            if credentials_info.get("project_id") != project_string:
+                raise ValueError(f"❌ Mismatch project_id no TOML! Esperado: '{project_string}'.")
+
+            private_key = credentials_info.get("private_key", "")
+            if not (private_key.startswith("-----BEGIN PRIVATE KEY-----") and private_key.endswith("-----END PRIVATE KEY-----")):
+                raise ValueError("❌ PEM inválido no TOML (sem -----BEGIN/END ou \n ausentes). Re-cole o JSON.")
+
+            print("✅ Credenciais carregadas do TOML (prod). PEM válido.")
+            return credentials_info
+        except (KeyError, json.JSONDecodeError, ValueError) as toml_e:
+            print(f"❌ TOML falhou em prod: {toml_e}")
+            raise Exception(
+                f"❌ Erro no TOML em prod: {toml_e}\n"
+                f"💡 Cole o TOML completo no dashboard (incluindo service_account_json com \n literais na private_key)."
+            )
+
+    # Se local: Tenta Secret Manager/arquivo como antes (com ADC robusto)
+    try:
+        # Tenta ADC com timeout curto (5s) para evitar hang
+        from google.auth import default
+        import google.auth.transport.requests
+        request = google.auth.transport.requests.Request(timeout=5.0)
+        credentials, _ = default(request=request)
+        print("🔍 ADC disponível para local/Secret Manager.")
+    except Exception as adc_error:
+        print(f"⚠️ ADC falhou em local: {adc_error}. Pulando Secret Manager.")
+        credentials = None
+
+    # Tenta Secret Manager se ADC OK
+    if credentials:
+        try:
+            client_options = ClientOptions(api_endpoint="us-secretmanager.googleapis.com")
+            client = secretmanager.SecretManagerServiceClient(credentials=credentials, client_options=client_options)
+            name = f"projects/{project_numeric}/secrets/DocumentAiTeste/versions/latest"
+            print(f"🔍 Acessando secret: {name} (timeout 120s)")
+            response = client.access_secret_version(request={"name": name}, timeout=120.0)
+            credentials_info = json.loads(response.payload.data.decode("UTF-8"))
+
+            if credentials_info.get("project_id") != project_string:
+                raise ValueError(f"❌ Mismatch no secret! Esperado: '{project_string}'.")
+
+            print("✅ Secret Manager sucesso (local).")
+            return credentials_info
+        except Exception as sm_error:
+            print(f"⚠️ Secret Manager falhou: {sm_error}. Tentando arquivo local.")
+
+    # Fallback final: Arquivo local
+    if json_path and os.path.exists(json_path):
+        try:
+            with open(json_path, "r") as f:
+                credentials_info = json.load(f)
+            if credentials_info.get("project_id") != project_string:
+                raise ValueError(f"❌ Mismatch no arquivo! Esperado: '{project_string}'.")
+            print(f"✅ Arquivo local carregado: {json_path}.")
+            return credentials_info
+        except Exception as file_e:
+            print(f"❌ Arquivo falhou: {file_e}")
+
+    # Se chegar aqui em local: Erro total
+    raise Exception("❌ Nenhum fallback funcionou em local. Verifique arquivo ou secret.")
     """Carrega credenciais do Secret Manager com fallback para arquivo/TOML (prod-friendly)."""
     # Usa variáveis globais de secrets.toml
     project_numeric = PROJECT_ID_NUMERIC
