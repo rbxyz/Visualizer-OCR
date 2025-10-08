@@ -1,2 +1,7 @@
 venv/
-.gitignore
+.env
+.usage_state.json
+*.json
+__pycache__/
+google-cloud-sdk/
+.devcontainer/
