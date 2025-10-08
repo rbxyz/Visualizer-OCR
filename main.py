@@ -3,8 +3,8 @@ import time
 import tempfile
 import os
 import re
-import json  # NOVO: Para parsear JSON do Secret Manager
-from datetime import datetime
+import json
+from datetime import datetime, UTC
 from PIL import Image, ImageDraw
 from dotenv import load_dotenv
 from google.cloud import secretmanager
@@ -15,38 +15,82 @@ from google.cloud.documentai_v1 import (
     RawDocument,
 )
 from google.cloud.documentai_v1.types import ProcessOptions, OcrConfig
-from google.oauth2 import service_account  # NOVO: Para criar credenciais a partir do JSON do Secret Manager
+from google.oauth2 import service_account
 
 load_dotenv()
 
-# NOVO: Defina PROJECT_ID cedo para get_credentials() (com fallback)
+# Defina PROJECT_ID cedo para get_credentials() (com fallback)
 PROJECT_ID = os.environ.get("PROJECT_ID", "811447882024")
 
-# puxar credenciais do secret manager (mantida, mas agora usada no client)
+# puxar credenciais do secret manager (corrigida com nome "DocumentAiTeste" e fallback)
 def get_credentials():
-    client = secretmanager.SecretManagerServiceClient()
-    name = f"projects/{PROJECT_ID}/secrets/documentai-key/versions/latest"
-    response = client.access_secret_version(request={"name": name})
-    return json.loads(response.payload.data.decode("UTF-8"))
+    """Carrega credenciais do Secret Manager com fallback para arquivo local."""
+    # Usa numeric para paths de API, string para validação de JSON
+    project_numeric = os.environ.get("PROJECT_ID_NUMERIC", "811447882024")
+    project_string = os.environ.get("PROJECT_ID_STRING", "marcaai-469014")  # ← CORRETO: Project ID string do seu projeto
+    print(f"🔍 Projeto Numérico (para API): {project_numeric}")
+    print(f"🔍 Projeto String (para SA JSON): {project_string}")
+    # Tenta Secret Manager primeiro (path usa numeric)
+    try:
+        client = secretmanager.SecretManagerServiceClient()
+        name = f"projects/{project_numeric}/secrets/DocumentAiTeste/versions/latest"  # Path correto com numeric
+        print(f"🔍 Tentando acessar secret: {name}")
+        response = client.access_secret_version(request={"name": name})
+        credentials_info = json.loads(response.payload.data.decode("UTF-8"))
+        
+        # Validação CORRIGIDA: Compara com Project ID string (não numeric)
+        if credentials_info.get("project_id") != project_string:
+            raise ValueError(
+                f"❌ Mismatch de Project ID no secret! JSON tem '{credentials_info.get('project_id')}', "
+                f"mas esperado: '{project_string}'. Verifique o JSON da SA."
+            )
+        
+        print("✅ Credenciais carregadas do Secret Manager com sucesso (Project ID validado).")
+        return credentials_info
+    except Exception as e:
+        print(f"⚠️ Erro ao carregar do Secret Manager: {e}. Tentando fallback para arquivo local.")
+        
+        # Fallback: Usa GOOGLE_APPLICATION_CREDENTIALS se definido
+        json_path = os.environ.get("GOOGLE_APPLICATION_CREDENTIALS")
+        if json_path and os.path.exists(json_path):
+            try:
+                with open(json_path, "r") as f:
+                    credentials_info = json.load(f)
+                # Validação corrigida no fallback
+                if credentials_info.get("project_id") != project_string:
+                    raise ValueError(
+                        f"❌ Mismatch de Project ID no fallback JSON! Tem '{credentials_info.get('project_id')}', "
+                        f"esperado: '{project_string}'."
+                    )
+                print(f"✅ Credenciais carregadas do arquivo local: {json_path} (Project ID validado).")
+                return credentials_info
+            except Exception as fallback_e:
+                print(f"❌ Erro no fallback local: {fallback_e}")
+        else:
+            print(f"❌ Sem GOOGLE_APPLICATION_CREDENTIALS definido ou arquivo não encontrado: {json_path}")
+        
+        raise Exception(
+            f"❌ Falha total no carregamento de credenciais. Erro principal: {e}\n"
+        )
+            
 
 # Estado de sessão (inicia cronômetro e login)
 if "tempo_start_total" not in st.session_state:
     st.session_state["tempo_start_total"] = time.time()
 if "logged_in" not in st.session_state:
     st.session_state["logged_in"] = False
-if "is_test_user" not in st.session_state:  # NOVO: Flag para usuário de teste
+if "is_test_user" not in st.session_state:
     st.session_state["is_test_user"] = False
 
-# Credenciais via env (sem fallbacks hardcoded por segurança; configure no .env)
+# Credenciais via env
 DEFAULT_EMAIL = os.environ.get("APP_EMAIL")
 DEFAULT_PASSWORD = os.environ.get("APP_PASSWORD")
 
-# NOVO: Credenciais do usuário de teste (hardcoded para simplicidade; pode mover para .env)
+# Credenciais do usuário de teste
 TEST_EMAIL = os.environ.get("TEST_EMAIL", "test@example.com")
 TEST_PASSWORD = os.environ.get("TEST_PASSWORD", "test123")
-TEST_USAGE_LIMIT = int(os.environ.get("TEST_USAGE_LIMIT", "50"))  # Limite de 50 usos para teste
+TEST_USAGE_LIMIT = int(os.environ.get("TEST_USAGE_LIMIT", "50"))
 
-# NOVO: Se credenciais normais não definidas, avise (mas permita teste sem parar)
 if not DEFAULT_EMAIL or not DEFAULT_PASSWORD:
     print("⚠️ APP_EMAIL e APP_PASSWORD não configuradas – apenas modo teste disponível.")
 
@@ -59,13 +103,11 @@ def login():
     password = st.text_input("🔑 Senha", type="password", placeholder="Digite sua senha")
     
     if st.button("Entrar", type="primary"):
-        # NOVO: Verifica usuário de teste primeiro
         if email == TEST_EMAIL and password == TEST_PASSWORD:
             st.session_state["logged_in"] = True
             st.session_state["is_test_user"] = True
             st.success("✅ Login como usuário de teste realizado! (Limite: 50 usos) Redirecionando...")
             st.rerun()
-        # Verifica usuário normal
         elif DEFAULT_EMAIL and DEFAULT_PASSWORD and email == DEFAULT_EMAIL and password == DEFAULT_PASSWORD:
             st.session_state["logged_in"] = True
             st.session_state["is_test_user"] = False
@@ -75,21 +117,26 @@ def login():
             st.error("❌ Email ou senha incorretos. Tente novamente.")
     
     st.markdown("---")
-    # NOVO: Exibe credenciais de teste na tela (apenas para fins de teste/desenvolvimento)
     st.info(
         "**👨‍💻 Usuário de Teste (para experimentação rápida):**\n"
         f"- Email: `{TEST_EMAIL}`\n"
         f"- Senha: `{TEST_PASSWORD}`\n"
         f"- Limite: {TEST_USAGE_LIMIT} processamentos por mês (contador separado)\n\n"
+        "**⚠️ Modo Produção:** Configure APP_EMAIL/APP_PASSWORD no .env para usuários reais.\n"
+        "Use autenticação externa (ex: Google OAuth) para segurança. Remova esta exibição em produção."
     )
     if not DEFAULT_EMAIL or not DEFAULT_PASSWORD:
         st.warning("⚠️ Credenciais normais não configuradas – use o usuário de teste.")
+    else:
+        st.info(
+            "**⚠️ Para produção:** Use autenticação externa (ex: Google OAuth). Credenciais configuradas via .env."
+        )
 
-# Função de logout (atualizada para resetar flag de teste)
+# Função de logout
 def logout():
     if st.sidebar.button("🚪 Sair", type="secondary"):
         st.session_state["logged_in"] = False
-        st.session_state["is_test_user"] = False  # NOVO: Reseta flag
+        st.session_state["is_test_user"] = False
         st.success("Logout realizado. Volte quando quiser!")
         st.rerun()
 
@@ -97,20 +144,18 @@ def logout():
 if not st.session_state["logged_in"]:
     login()
 else:
-    # Logout no sidebar
     logout()
     
-    # NOVO: Determina se é usuário de teste para UI
     is_test = st.session_state.get("is_test_user", False)
     
-    # UI principal (apenas se logado)
+    # UI principal
     st.title("Visualizer OCR")
     st.markdown(
         f"Sistema usando Google Cloud Document AI para OCR otimizado em Português, voltado para transcriçaõ de escritas manuais. "
         f"{'(Modo Teste: Limite 50 usos)' if is_test else 'Uso limitado a 1000 processamentos por mês (Free Tier)'}."
     )
 
-    # Sidebar - Configurações e controle de uso
+    # Sidebar
     st.sidebar.header("⚙️ Configurações")
     enable_symbol_detection = st.sidebar.checkbox(
         "Exibir Bounding Boxes (caracteres/tokens)", value=True, help="Mostra retângulos vermelhos em volta dos tokens detectados"
@@ -120,11 +165,11 @@ else:
     )
     st.sidebar.markdown("Idioma OCR: priorizado para Português (pt) com fallback em Inglês (en).")
 
-    # Config Document AI (mantido, mas LOCATION e PROCESSOR_ID com env)
+    # Config Document AI
     LOCATION = os.environ.get("LOCATION", "us")
     PROCESSOR_ID = os.environ.get("PROCESSOR_ID", "8d9d68ebce2afb84")
 
-    # NOVO: Configs de uso baseadas no usuário
+    # Configs de uso baseadas no usuário
     USAGE_LIMIT = TEST_USAGE_LIMIT if is_test else int(os.environ.get("USAGE_LIMIT", "1000"))
     USAGE_STATE_PATH = ".usage_state_test.json" if is_test else os.environ.get(
         "USAGE_STATE_PATH",
@@ -132,11 +177,10 @@ else:
     )
 
     def _current_month_key() -> str:
-        # Usa UTC para consistência com ciclos mensais de billing
-        return datetime.utcnow().strftime("%Y-%m")
+        # CORRIGIDO: Usa datetime.now(UTC) em vez de utcnow() (sem warning)
+        return datetime.now(UTC).strftime("%Y-%m")
 
     def _load_usage_state() -> dict:
-        # Carrega estado do arquivo; reseta se mudou o mês
         now_month = _current_month_key()
         state = {"month": now_month, "used": 0}
         try:
@@ -174,7 +218,7 @@ else:
         _save_usage_state(state)
         return state
 
-    # Mostrar status de uso no sidebar (atualizado para teste)
+    # Mostrar status de uso no sidebar
     usage_state = _load_usage_state()
     remaining = max(0, USAGE_LIMIT - usage_state["used"])
     usage_ratio = min(1.0, usage_state["used"] / USAGE_LIMIT) if USAGE_LIMIT else 0.0
@@ -195,7 +239,6 @@ else:
         return mime_types.get(file_extension.lower(), "application/octet-stream")
 
     def _text_from_anchor(text_anchor, full_text: str) -> str:
-        """Extrai texto de um TextAnchor usando text_segments (v1), com fallback seguro."""
         if not text_anchor or not full_text:
             return ""
         segments = getattr(text_anchor, "text_segments", None)
@@ -209,7 +252,6 @@ else:
                 parts.append(full_text[start:end])
             return "".join(parts).strip()
 
-        # Fallback legacy (se existir)
         content_locations = getattr(text_anchor, "content_locations", None)
         if content_locations:
             try:
@@ -222,14 +264,12 @@ else:
         return ""
 
     def extract_text_by_paragraphs(document) -> list[str]:
-        """Extrai texto separado por parágrafos/linhas de todas as páginas, com fallbacks."""
         if not getattr(document, "pages", None):
             return [document.text.strip()] if document.text else ["Nenhum texto detectado."]
 
         lines = []
         full_text = document.text or ""
 
-        # Prioriza paragraphs
         for page in document.pages:
             for p in getattr(page, "paragraphs", []):
                 para_text = _text_from_anchor(getattr(p.layout, "text_anchor", None), full_text)
@@ -237,7 +277,6 @@ else:
                 if para_text:
                     lines.append(para_text)
 
-        # Fallback para blocks
         if not lines:
             for page in document.pages:
                 for b in getattr(page, "blocks", []):
@@ -251,7 +290,6 @@ else:
         return lines
 
     def draw_bounding_boxes(image: Image.Image, document) -> Image.Image:
-        """Desenha bounding boxes dos tokens detectados (1ª página) na imagem."""
         if not getattr(document, "pages", None):
             return image
         if not getattr(document.pages[0], "tokens", None):
@@ -267,7 +305,6 @@ else:
                 if not bpoly:
                     continue
 
-                # normalized_vertices preferencial
                 vertices = getattr(bpoly, "normalized_vertices", None)
                 if vertices and len(vertices) >= 2:
                     x_coords = [v.x * width for v in vertices]
@@ -283,34 +320,34 @@ else:
                 y_min, y_max = min(y_coords), max(y_coords)
                 draw.rectangle([x_min, y_min, x_max, y_max], outline="red", width=2)
 
-                # (Opcional) Rótulo com texto do token:
                 token_text = _text_from_anchor(getattr(token.layout, "text_anchor", None), document.text or "")
                 if token_text:
                     label = token_text[:10] + ("..." if len(token_text) > 10 else "")
                     draw.text((x_min, max(0, y_min - 14)), label, fill="red")
 
             except Exception as e:
-                # Continua mesmo se algum token falhar
                 print(f"⚠️ Erro ao desenhar token: {e}")
                 continue
 
         return image
 
+    # CORRIGIDO: Definição da função ANTES da chamada (process_document_sample)
     def process_document_sample(project_id: str, location: str, processor_id: str, file_path: str, mime_type: str):
         """
         Processa documento com Document AI usando endpoint regional.
-        - Ativa hints de idioma (pt/en) via OcrConfig.Hints.
-        - Endpoint: {location}-documentai.googleapis.com (ex.: us-documentai.googleapis.com)
-        - NOVO: Usa credenciais do Secret Manager
+        - CORRIGIDO: Usa credenciais do Secret Manager com fallback
         """
-        # NOVO: Carrega credenciais do Secret Manager
-        credentials_info = get_credentials()
-        credentials = service_account.Credentials.from_service_account_info(
-            credentials_info,
-            scopes=["https://www.googleapis.com/auth/cloud-platform"]
-        )
+        try:
+            credentials_info = get_credentials()
+            credentials = service_account.Credentials.from_service_account_info(
+                credentials_info,
+                scopes=["https://www.googleapis.com/auth/cloud-platform"]
+            )
+            print("✅ Credenciais aplicadas ao client do Document AI.")
+        except Exception as e:
+            st.error(f"❌ Erro ao carregar credenciais: {e}")
+            st.stop()
 
-        # Cliente com credenciais e endpoint regional
         client = DocumentProcessorServiceClient(
             credentials=credentials,
             client_options={"api_endpoint": f"{location}-documentai.googleapis.com"}
@@ -323,11 +360,8 @@ else:
 
         raw_document = RawDocument(content=content, mime_type=mime_type)
 
-        # Hints de idioma (BCP-47) via classe aninhada OcrConfig.Hints
-        # Observação: Muitos processadores já utilizam heurísticas; hints ajudam a priorizar PT.
         ocr_config = OcrConfig(
             hints=documentai.OcrConfig.Hints(language_hints=["pt", "en"])
-            # Não setamos campos não documentados/obsoletos para evitar "Unknown field"
         )
 
         process_options = ProcessOptions(ocr_config=ocr_config)
@@ -338,26 +372,23 @@ else:
             process_options=process_options,
         )
 
-        # Processamento síncrono
         result = client.process_document(request=request)
         return result.document
 
-    # Upload
+    # Upload (agora a chamada da função é válida, pois definida acima)
     uploaded_file = st.file_uploader("📤 Carregue uma imagem com escrita cursiva", type=["jpg", "jpeg", "png"])
 
     if uploaded_file is not None:
         file_extension = os.path.splitext(uploaded_file.name)[1]
         mime_type = get_mime_type(file_extension)
 
-        # Exibe imagem original
         image = Image.open(uploaded_file)
         st.image(image, caption="📸 Imagem Carregada (Original)", width='stretch')
 
         if st.button("🚀 Processar com Document AI", type="primary"):
-            # Verifica limite de uso ANTES de processar
             allowed, remaining, _ = can_process(units=1)
             if not allowed:
-                limit_type = "Teste" if is_test else "Normal"  # NOVO: Usa tipo específico
+                limit_type = "Teste" if is_test else "Normal"
                 st.error(f"❌ Limite de uso mensal atingido! ({USAGE_LIMIT} processamentos - Modo {limit_type}). Restantes: 0")
                 st.info("💡 Aguarde o próximo mês ou contate o administrador para reset manual.")
                 st.stop()  # Para o fluxo
@@ -389,7 +420,7 @@ else:
                 units_used = len(getattr(document, "pages", [])) if getattr(document, "pages", []) else 1
                 record_usage(units=units_used)  # Atualiza contador após sucesso
 
-                # NOVO: Atualiza sidebar com novo estado (para refletir o uso, com tipo de limite)
+                # Atualiza sidebar com novo estado (para refletir o uso, com tipo de limite)
                 usage_state = _load_usage_state()
                 remaining = max(0, USAGE_LIMIT - usage_state["used"])
                 limit_type = "Teste" if is_test else "Normal"
@@ -464,7 +495,7 @@ else:
                             "Tokens Detectados (Bounding Boxes)": num_tokens,
                             "Parágrafos/Linhas Detectados": num_paragraphs,
                             "Unidades Consumidas Neste Processamento": units_used,
-                            "Modo de Usuário": f"{'Teste (Limite 50)' if is_test else 'Normal (Limite 1000)'}",  # NOVO: Indica modo
+                            "Modo de Usuário": f"{'Teste (Limite 50)' if is_test else 'Normal (Limite 1000)'}",
                         },
                         "Tempos (segundos)": {
                             "Processamento Document AI": f"{tempo_process_fim - tempo_process:.3f}",
@@ -481,7 +512,7 @@ else:
                             "Consumidos": usage_state["used"],
                             "Limite": USAGE_LIMIT,
                             "Restantes": remaining,
-                            "Tipo de Limite": limit_type,  # NOVO: Especifica se Teste ou Normal
+                            "Tipo de Limite": limit_type,
                         },
                     }
                 )
@@ -505,7 +536,7 @@ else:
             except Exception as e:
                 st.error(f"❌ Erro no processamento: {str(e)}")
                 st.info(
-                    "💡 Verifique: SDK instalado? Secret Manager configurado com 'documentai-key'? "
+                    "💡 Verifique: SDK instalado? Secret Manager configurado com 'DocumentAiTeste'? "
                     "Permissões (roles/documentai.user e secretmanager.secretAccessor) no projeto e tipo de processador compatível?"
                 )
             finally:
@@ -522,13 +553,13 @@ else:
             - Extração de texto com hints de idioma (PT/EN) para melhor acurácia
             - Separação por linhas/parágrafos (evita texto corrido)
             - Visualização de bounding boxes (tokens/caracteres) na imagem
-            - **Controle de Uso: Limitado a 1000 processamentos por mês (Free Tier)**
+            - **Controle de Uso: Limitado a 1000 processamentos por mês (Free Tier) para modo normal; 50 para teste**
             - **Autenticação: Login requerido para acesso**
 
             #### Dicas
             - Se o texto vier corrido, mantenha a opção "Extrair por Linhas/Parágrafos" ativada.
             - Se boxes atrapalharem a visualização, desative "Exibir Bounding Boxes".
-            - **Uso Mensal:** O contador reseta automaticamente no início de cada mês (UTC). Arquivo de estado: .usage_state.json
+            - **Uso Mensal:** O contador reseta automaticamente no início de cada mês (UTC). Arquivos de estado: .usage_state.json (normal) ou .usage_state_test.json (teste)
             """
         )
 
@@ -549,4 +580,3 @@ else:
 #⠀⠀⠀⠀⠀⠀⠀⠀⠀⠘⠛⠛⠛⠛⠃⠉⠙⢏⣾⣧⢹⣿⠀⠀⠀⠀⠀⠀⠀
 #⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠙⠿⣾⡏⠀⠀⠀⠀⠀⠀⠀
 #
-               
