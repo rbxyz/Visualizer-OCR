@@ -6,7 +6,6 @@ import re
 import json
 from datetime import datetime, UTC
 from PIL import Image, ImageDraw
-from dotenv import load_dotenv
 from google.cloud import secretmanager
 from google.cloud import documentai_v1 as documentai
 from google.cloud.documentai_v1 import (
@@ -17,29 +16,44 @@ from google.cloud.documentai_v1 import (
 from google.cloud.documentai_v1.types import ProcessOptions, OcrConfig
 from google.oauth2 import service_account
 
-load_dotenv()
+# Carregamento exclusivo de secrets.toml (sem dotenv ou os.environ)
+try:
+    # Extrai seções do st.secrets
+    app = st.secrets["app"]
+    app_test = st.secrets["app"]["test"]
+    google = st.secrets["google"]
 
-APP_EMAIL = st.secrets["app"]["email"]
-APP_PASSWORD = st.secrets["app"]["password"]
-TEST_EMAIL = st.secrets["app"]["test"]["email"]
-TEST_PASSWORD = st.secrets["app"]["test"]["password"]
-TEST_USAGE_LIMIT = st.secrets["app"]["test"]["usage_limit"]
-USAGE_LIMIT = st.secrets["app"]["usage_limit"]
-PROJECT_ID_NUMERIC = st.secrets["google"]["project_id_numeric"]
-PROJECT_ID_STRING = st.secrets["google"]["project_id_string"]
-LOCATION = st.secrets["google"]["location"]
-PROCESSOR_ID = st.secrets["google"]["processor_id"]
-GOOGLE_APPLICATION_CREDENTIALS = st.secrets["google"]["application_credentials_path"]
+    # Atribui variáveis globais
+    APP_EMAIL = app["email"]
+    APP_PASSWORD = app["password"]
+    USAGE_LIMIT = app["usage_limit"]  # 950 (int do TOML)
 
-# Defina PROJECT_ID cedo para get_credentials() (com fallback)
-PROJECT_ID = os.environ.get("PROJECT_ID", "811447882024")
+    TEST_EMAIL = app_test["email"]
+    TEST_PASSWORD = app_test["password"]
+    TEST_USAGE_LIMIT = app_test["usage_limit"]  # 50 (int do TOML)
 
-# puxar credenciais do secret manager (corrigida com nome "DocumentAiTeste" e fallback)
+    PROJECT_ID_NUMERIC = google["project_id_numeric"]
+    PROJECT_ID_STRING = google["project_id_string"]
+    LOCATION = google["location"]
+    PROCESSOR_ID = google["processor_id"]
+    GOOGLE_APPLICATION_CREDENTIALS = google["application_credentials_path"]
+
+    # PROJECT_ID para API (numeric)
+    PROJECT_ID = PROJECT_ID_NUMERIC
+
+except KeyError as e:
+    st.error(f"❌ Erro no secrets.toml: Chave '{e}' não encontrada. Verifique o arquivo .streamlit/secrets.toml ou o dashboard de produção.")
+    st.stop()
+except Exception as e:
+    st.error(f"❌ Erro ao carregar secrets.toml: {e}. Certifique-se de que o arquivo está no local correto (.streamlit/secrets.toml).")
+    st.stop()
+
+# puxar credenciais do secret manager (ajustada para usar variáveis de secrets.toml)
 def get_credentials():
     """Carrega credenciais do Secret Manager com fallback para arquivo local."""
-    # Usa numeric para paths de API, string para validação de JSON
-    project_numeric = os.environ.get("PROJECT_ID_NUMERIC", "811447882024")
-    project_string = os.environ.get("PROJECT_ID_STRING", "marcaai-469014")  # ← CORRETO: Project ID string do seu projeto
+    # Usa variáveis globais de secrets.toml
+    project_numeric = PROJECT_ID_NUMERIC
+    project_string = PROJECT_ID_STRING
     print(f"🔍 Projeto Numérico (para API): {project_numeric}")
     print(f"🔍 Projeto String (para SA JSON): {project_string}")
     # Tenta Secret Manager primeiro (path usa numeric)
@@ -62,8 +76,8 @@ def get_credentials():
     except Exception as e:
         print(f"⚠️ Erro ao carregar do Secret Manager: {e}. Tentando fallback para arquivo local.")
         
-        # Fallback: Usa GOOGLE_APPLICATION_CREDENTIALS se definido
-        json_path = os.environ.get("GOOGLE_APPLICATION_CREDENTIALS")
+        # Fallback: Usa GOOGLE_APPLICATION_CREDENTIALS de secrets.toml
+        json_path = GOOGLE_APPLICATION_CREDENTIALS
         if json_path and os.path.exists(json_path):
             try:
                 with open(json_path, "r") as f:
@@ -79,12 +93,12 @@ def get_credentials():
             except Exception as fallback_e:
                 print(f"❌ Erro no fallback local: {fallback_e}")
         else:
-            print(f"❌ Sem GOOGLE_APPLICATION_CREDENTIALS definido ou arquivo não encontrado: {json_path}")
+            print(f"❌ Arquivo de fallback não encontrado: {json_path}")
         
         raise Exception(
             f"❌ Falha total no carregamento de credenciais. Erro principal: {e}\n"
+            f"💡 Verifique: Secret 'DocumentAiTeste' no projeto {project_numeric}, ou arquivo local em {json_path}."
         )
-            
 
 # Estado de sessão (inicia cronômetro e login)
 if "tempo_start_total" not in st.session_state:
@@ -94,19 +108,7 @@ if "logged_in" not in st.session_state:
 if "is_test_user" not in st.session_state:
     st.session_state["is_test_user"] = False
 
-# Credenciais via env
-DEFAULT_EMAIL = os.environ.get("APP_EMAIL")
-DEFAULT_PASSWORD = os.environ.get("APP_PASSWORD")
-
-# Credenciais do usuário de teste
-TEST_EMAIL = os.environ.get("TEST_EMAIL", "test@example.com")
-TEST_PASSWORD = os.environ.get("TEST_PASSWORD", "test123")
-TEST_USAGE_LIMIT = int(os.environ.get("TEST_USAGE_LIMIT", "50"))
-
-if not DEFAULT_EMAIL or not DEFAULT_PASSWORD:
-    print("⚠️ APP_EMAIL e APP_PASSWORD não configuradas – apenas modo teste disponível.")
-
-# Função de login simples (atualizada com usuário de teste e exibição de credenciais)
+# Função de login simples (ajustada para usar variáveis de secrets.toml)
 def login():
     st.title("🔐 Login Necessário")
     st.info("Para acessar o sistema de OCR com Document AI, faça login com suas credenciais.")
@@ -120,7 +122,7 @@ def login():
             st.session_state["is_test_user"] = True
             st.success("✅ Login como usuário de teste realizado! (Limite: 50 usos) Redirecionando...")
             st.rerun()
-        elif DEFAULT_EMAIL and DEFAULT_PASSWORD and email == DEFAULT_EMAIL and password == DEFAULT_PASSWORD:
+        elif email == APP_EMAIL and password == APP_PASSWORD:
             st.session_state["logged_in"] = True
             st.session_state["is_test_user"] = False
             st.success("✅ Login realizado com sucesso! Redirecionando...")
@@ -134,15 +136,9 @@ def login():
         f"- Email: `{TEST_EMAIL}`\n"
         f"- Senha: `{TEST_PASSWORD}`\n"
         f"- Limite: {TEST_USAGE_LIMIT} processamentos por mês (contador separado)\n\n"
-        "**⚠️ Modo Produção:** Configure APP_EMAIL/APP_PASSWORD no .env para usuários reais.\n"
+        "**⚠️ Modo Produção:** Credenciais configuradas via secrets.toml. "
         "Use autenticação externa (ex: Google OAuth) para segurança. Remova esta exibição em produção."
     )
-    if not DEFAULT_EMAIL or not DEFAULT_PASSWORD:
-        st.warning("⚠️ Credenciais normais não configuradas – use o usuário de teste.")
-    else:
-        st.info(
-            "**⚠️ Para produção:** Use autenticação externa (ex: Google OAuth). Credenciais configuradas via .env."
-        )
 
 # Função de logout
 def logout():
@@ -164,7 +160,7 @@ else:
     st.title("Visualizer OCR")
     st.markdown(
         f"Sistema usando Google Cloud Document AI para OCR otimizado em Português, voltado para transcriçaõ de escritas manuais. "
-        f"{'(Modo Teste: Limite 50 usos)' if is_test else 'Uso limitado a 1000 processamentos por mês (Free Tier)'}."
+        f"{'(Modo Teste: Limite 50 usos)' if is_test else 'Uso limitado a 950 processamentos por mês (Free Tier)'}."
     )
 
     # Sidebar
@@ -177,16 +173,9 @@ else:
     )
     st.sidebar.markdown("Idioma OCR: priorizado para Português (pt) com fallback em Inglês (en).")
 
-    # Config Document AI
-    LOCATION = os.environ.get("LOCATION", "us")
-    PROCESSOR_ID = os.environ.get("PROCESSOR_ID", "8d9d68ebce2afb84")
-
-    # Configs de uso baseadas no usuário
-    USAGE_LIMIT = TEST_USAGE_LIMIT if is_test else int(os.environ.get("USAGE_LIMIT", "1000"))
-    USAGE_STATE_PATH = ".usage_state_test.json" if is_test else os.environ.get(
-        "USAGE_STATE_PATH",
-        os.path.join(os.path.dirname(__file__), ".usage_state.json")
-    )
+    # Configs de uso baseadas no usuário (usa globais de secrets.toml)
+    USAGE_LIMIT_CURRENT = TEST_USAGE_LIMIT if is_test else USAGE_LIMIT
+    USAGE_STATE_PATH = ".usage_state_test.json" if is_test else ".usage_state.json"
 
     def _current_month_key() -> str:
         # CORRIGIDO: Usa datetime.now(UTC) em vez de utcnow() (sem warning)
@@ -220,7 +209,7 @@ else:
 
     def can_process(units: int = 1) -> tuple[bool, int, dict]:
         state = _load_usage_state()
-        remaining = max(0, USAGE_LIMIT - state["used"])
+        remaining = max(0, USAGE_LIMIT_CURRENT - state["used"])
         allowed = units <= remaining
         return allowed, remaining, state
 
@@ -232,14 +221,14 @@ else:
 
     # Mostrar status de uso no sidebar
     usage_state = _load_usage_state()
-    remaining = max(0, USAGE_LIMIT - usage_state["used"])
-    usage_ratio = min(1.0, usage_state["used"] / USAGE_LIMIT) if USAGE_LIMIT else 0.0
+    remaining = max(0, USAGE_LIMIT_CURRENT - usage_state["used"])
+    usage_ratio = min(1.0, usage_state["used"] / USAGE_LIMIT_CURRENT) if USAGE_LIMIT_CURRENT else 0.0
     st.sidebar.subheader("🧮 Controle de Uso (Mensal)")
     limit_type = "Teste" if is_test else "Normal"
-    st.sidebar.metric(f"Usos consumidos ({limit_type})", f"{usage_state['used']} / {USAGE_LIMIT}")
+    st.sidebar.metric(f"Usos consumidos ({limit_type})", f"{usage_state['used']} / {USAGE_LIMIT_CURRENT}")
     st.sidebar.progress(usage_ratio, text=f"Restantes: {remaining}")
     if remaining == 0:
-        st.sidebar.error(f"Limite de {limit_type} ({USAGE_LIMIT} usos) atingido. Novos processamentos serão bloqueados.")
+        st.sidebar.error(f"Limite de {limit_type} ({USAGE_LIMIT_CURRENT} usos) atingido. Novos processamentos serão bloqueados.")
 
     def get_mime_type(file_extension: str) -> str:
         mime_types = {
@@ -401,7 +390,7 @@ else:
             allowed, remaining, _ = can_process(units=1)
             if not allowed:
                 limit_type = "Teste" if is_test else "Normal"
-                st.error(f"❌ Limite de uso mensal atingido! ({USAGE_LIMIT} processamentos - Modo {limit_type}). Restantes: 0")
+                st.error(f"❌ Limite de uso mensal atingido! ({USAGE_LIMIT_CURRENT} processamentos - Modo {limit_type}). Restantes: 0")
                 st.info("💡 Aguarde o próximo mês ou contate o administrador para reset manual.")
                 st.stop()  # Para o fluxo
 
@@ -434,12 +423,12 @@ else:
 
                 # Atualiza sidebar com novo estado (para refletir o uso, com tipo de limite)
                 usage_state = _load_usage_state()
-                remaining = max(0, USAGE_LIMIT - usage_state["used"])
+                remaining = max(0, USAGE_LIMIT_CURRENT - usage_state["used"])
                 limit_type = "Teste" if is_test else "Normal"
-                st.sidebar.metric(f"Usos consumidos ({limit_type})", f"{usage_state['used']} / {USAGE_LIMIT}")
-                st.sidebar.progress(min(1.0, usage_state["used"] / USAGE_LIMIT), text=f"Restantes: {remaining}")
+                st.sidebar.metric(f"Usos consumidos ({limit_type})", f"{usage_state['used']} / {USAGE_LIMIT_CURRENT}")
+                st.sidebar.progress(min(1.0, usage_state["used"] / USAGE_LIMIT_CURRENT), text=f"Restantes: {remaining}")
                 if remaining == 0:
-                    st.sidebar.error(f"Limite de {limit_type} ({USAGE_LIMIT} usos) atingido. Novos processamentos serão bloqueados.")
+                    st.sidebar.error(f"Limite de {limit_type} ({USAGE_LIMIT_CURRENT} usos) atingido. Novos processamentos serão bloqueados.")
 
                 # Extração de texto (linhas/parágrafos ou texto corrido)
                 if extract_by_lines:
@@ -507,7 +496,7 @@ else:
                             "Tokens Detectados (Bounding Boxes)": num_tokens,
                             "Parágrafos/Linhas Detectados": num_paragraphs,
                             "Unidades Consumidas Neste Processamento": units_used,
-                            "Modo de Usuário": f"{'Teste (Limite 50)' if is_test else 'Normal (Limite 1000)'}",
+                            "Modo de Usuário": f"{'Teste (Limite 50)' if is_test else 'Normal (Limite 950)'}",
                         },
                         "Tempos (segundos)": {
                             "Processamento Document AI": f"{tempo_process_fim - tempo_process:.3f}",
@@ -522,7 +511,7 @@ else:
                         },
                         "Uso Mensal": {
                             "Consumidos": usage_state["used"],
-                            "Limite": USAGE_LIMIT,
+                            "Limite": USAGE_LIMIT_CURRENT,
                             "Restantes": remaining,
                             "Tipo de Limite": limit_type,
                         },
@@ -565,7 +554,7 @@ else:
             - Extração de texto com hints de idioma (PT/EN) para melhor acurácia
             - Separação por linhas/parágrafos (evita texto corrido)
             - Visualização de bounding boxes (tokens/caracteres) na imagem
-            - **Controle de Uso: Limitado a 1000 processamentos por mês (Free Tier) para modo normal; 50 para teste**
+            - **Controle de Uso: Limitado a 950 processamentos por mês (Free Tier) para modo normal; 50 para teste**
             - **Autenticação: Login requerido para acesso**
 
             #### Dicas
