@@ -61,8 +61,21 @@ def get_credentials():
     # Tenta Secret Manager primeiro (com timeout e endpoint regional para prod)
     try:
         # Config client para prod: endpoint 'us' (ajuste se sua região for diferente), timeout 120s
+        # Primeiro tenta usar credenciais do ambiente (ADC ou GOOGLE_APPLICATION_CREDENTIALS)
+        credentials = None
+        try:
+            from google.auth import default
+            credentials, _ = default()
+            print("🔍 Usando Application Default Credentials para Secret Manager")
+        except Exception as adc_error:
+            print(f"⚠️ ADC não disponível: {adc_error}. Pulando Secret Manager e indo direto para fallback TOML.")
+            raise Exception("ADC_UNAVAILABLE")  # Força fallback imediato
+
         client_options = ClientOptions(api_endpoint="us-secretmanager.googleapis.com")
-        client = secretmanager.SecretManagerServiceClient(client_options=client_options)
+        client = secretmanager.SecretManagerServiceClient(
+            credentials=credentials,
+            client_options=client_options
+        )
         name = f"projects/{project_numeric}/secrets/DocumentAiTeste/versions/latest"
         print(f"🔍 Tentando acessar secret: {name} (timeout: 120s)")
 
@@ -82,41 +95,46 @@ def get_credentials():
     except Exception as sm_error:
         error_msg = str(sm_error)
         print(f"⚠️ Erro no Secret Manager: {error_msg} (código: {getattr(sm_error, 'code', 'unknown')})")
-        
-        if "504" in error_msg or "DEADLINE_EXCEEDED" in error_msg:
+
+        # Se ADC não está disponível, pula diretamente para TOML
+        if "ADC_UNAVAILABLE" in error_msg:
+            print("🔍 ADC indisponível - pulando para fallback TOML direto.")
+        elif "504" in error_msg or "DEADLINE_EXCEEDED" in error_msg:
             print("🔍 Detectado timeout 504 – comum em prod por latência. Tentando fallback.")
         elif "PERMISSION_DENIED" in error_msg:
             print("❌ Permissões insuficientes para Secret Manager. Adicione 'Secret Manager Secret Accessor' à SA no IAM.")
-        
-        # Fallback 1: Arquivo local (para dev)
-        json_path = GOOGLE_APPLICATION_CREDENTIALS
-        if json_path and os.path.exists(json_path):
-            try:
-                with open(json_path, "r") as f:
-                    credentials_info = json.load(f)
-                if credentials_info.get("project_id") != project_string:
-                    raise ValueError(f"❌ Mismatch no fallback JSON! Esperado: '{project_string}'.")
-                print(f"✅ Credenciais carregadas do arquivo local: {json_path}.")
-                return credentials_info
-            except Exception as fallback_e:
-                print(f"❌ Erro no fallback local: {fallback_e}")
-        
-        # Fallback 2: JSON direto do secrets.toml (para prod – com debug extra)
+
+        # Só tenta fallbacks se não for erro de ADC
+        if "ADC_UNAVAILABLE" not in error_msg:
+            # Fallback 1: Arquivo local (para dev)
+            json_path = GOOGLE_APPLICATION_CREDENTIALS
+            if json_path and os.path.exists(json_path):
+                try:
+                    with open(json_path, "r") as f:
+                        credentials_info = json.load(f)
+                    if credentials_info.get("project_id") != project_string:
+                        raise ValueError(f"❌ Mismatch no fallback JSON! Esperado: '{project_string}'.")
+                    print(f"✅ Credenciais carregadas do arquivo local: {json_path}.")
+                    return credentials_info
+                except Exception as fallback_e:
+                    print(f"❌ Erro no fallback local: {fallback_e}")
+
+        # Fallback 2: JSON direto do secrets.toml (para prod – com debug extra) - SEMPRE tenta se ADC falhar
         try:
             sa_json_str = st.secrets["google"]["service_account_json"]
             print(f"🔍 Tentando fallback TOML: String length = {len(sa_json_str)}")  # Debug: tamanho da string
             credentials_info = json.loads(sa_json_str)
             print(f"🔍 Fallback TOML parseado: project_id = {credentials_info.get('project_id')}")
             print(f"🔍 Private key starts with: {credentials_info.get('private_key', '')[:50]}...")  # Debug: preview da key (sem expor toda)
-            
+
             if credentials_info.get("project_id") != project_string:
                 raise ValueError(f"❌ Mismatch no fallback TOML! Esperado: '{project_string}'.")
-            
+
             # Validação extra: Verifica se private_key tem formato PEM válido (começa e termina correto)
             private_key = credentials_info.get("private_key", "")
             if not (private_key.startswith("-----BEGIN PRIVATE KEY-----") and private_key.endswith("-----END PRIVATE KEY-----")):
                 raise ValueError("❌ Formato da private_key inválido no TOML (PEM corrompido). Verifique escapes de \\n.")
-            
+
             print("✅ Credenciais carregadas diretamente do secrets.toml (fallback prod). Private key válida.")
             return credentials_info
         except (KeyError, json.JSONDecodeError) as toml_e:
@@ -381,10 +399,7 @@ else:
 
         client = DocumentProcessorServiceClient(
             credentials=credentials,
-            client_options={
-                "api_endpoint": f"{location}-documentai.googleapis.com",
-                "timeout": 120.0  # Timeout maior para OCR em prod (evita timeouts longos)
-            }
+            client_options=ClientOptions(api_endpoint=f"{location}-documentai.googleapis.com")
         )
 
         name = f"projects/{project_id}/locations/{location}/processors/{processor_id}"
@@ -406,7 +421,7 @@ else:
             process_options=process_options,
         )
 
-        result = client.process_document(request=request)
+        result = client.process_document(request=request, timeout=120.0)
         return result.document
 
     # Upload (agora a chamada da função é válida, pois definida acima)
