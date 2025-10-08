@@ -41,6 +41,7 @@ try:
     # PROJECT_ID para API (numeric)
     PROJECT_ID = PROJECT_ID_NUMERIC
 
+    st.sidebar.success("✅ Secrets.toml carregado com sucesso!")
 except KeyError as e:
     st.error(f"❌ Erro no secrets.toml: Chave '{e}' não encontrada. Verifique o arquivo .streamlit/secrets.toml ou o dashboard de produção.")
     st.stop()
@@ -48,7 +49,7 @@ except Exception as e:
     st.error(f"❌ Erro ao carregar secrets.toml: {e}. Certifique-se de que o arquivo está no local correto (.streamlit/secrets.toml).")
     st.stop()
 
-# puxar credenciais do secret manager
+# puxar credenciais do secret manager (versão única e corrigida: timeout, fallback TOML com debug)
 def get_credentials():
     """Carrega credenciais do Secret Manager com fallback para arquivo/TOML (prod-friendly)."""
     # Usa variáveis globais de secrets.toml
@@ -61,7 +62,7 @@ def get_credentials():
     try:
         # Config client para prod: endpoint 'us' (ajuste se sua região for diferente), timeout 120s
         client_options = {
-            "api_endpoint": "us-secretmanager.googleapis.com",  # Regional para reduzir latência (use 'secretmanager.googleapis.com' para global)
+            "api_endpoint": "us-secretmanager.googleapis.com",  # Regional para reduzir latência
             "timeout": 120.0  # Aumenta de 60s para 120s (evita 504)
         }
         client = secretmanager.SecretManagerServiceClient(client_options=client_options)
@@ -88,7 +89,7 @@ def get_credentials():
         if "504" in error_msg or "DEADLINE_EXCEEDED" in error_msg:
             print("🔍 Detectado timeout 504 – comum em prod por latência. Tentando fallback.")
         elif "PERMISSION_DENIED" in error_msg:
-            raise Exception(f"❌ Permissões insuficientes para Secret Manager. Adicione 'Secret Manager Secret Accessor' à SA no IAM.")
+            print("❌ Permissões insuficientes para Secret Manager. Adicione 'Secret Manager Secret Accessor' à SA no IAM.")
         
         # Fallback 1: Arquivo local (para dev)
         json_path = GOOGLE_APPLICATION_CREDENTIALS
@@ -103,74 +104,36 @@ def get_credentials():
             except Exception as fallback_e:
                 print(f"❌ Erro no fallback local: {fallback_e}")
         
-        # Fallback 2: JSON direto do secrets.toml (para prod – novo!)
+        # Fallback 2: JSON direto do secrets.toml (para prod – com debug extra)
         try:
             sa_json_str = st.secrets["google"]["service_account_json"]
+            print(f"🔍 Tentando fallback TOML: String length = {len(sa_json_str)}")  # Debug: tamanho da string
             credentials_info = json.loads(sa_json_str)
+            print(f"🔍 Fallback TOML parseado: project_id = {credentials_info.get('project_id')}")
+            print(f"🔍 Private key starts with: {credentials_info.get('private_key', '')[:50]}...")  # Debug: preview da key (sem expor toda)
+            
             if credentials_info.get("project_id") != project_string:
                 raise ValueError(f"❌ Mismatch no fallback TOML! Esperado: '{project_string}'.")
-            print("✅ Credenciais carregadas diretamente do secrets.toml (fallback prod).")
+            
+            # Validação extra: Verifica se private_key tem formato PEM válido (começa e termina correto)
+            private_key = credentials_info.get("private_key", "")
+            if not (private_key.startswith("-----BEGIN PRIVATE KEY-----") and private_key.endswith("-----END PRIVATE KEY-----")):
+                raise ValueError("❌ Formato da private_key inválido no TOML (PEM corrompido). Verifique escapes de \\n.")
+            
+            print("✅ Credenciais carregadas diretamente do secrets.toml (fallback prod). Private key válida.")
             return credentials_info
         except (KeyError, json.JSONDecodeError) as toml_e:
             print(f"❌ Fallback TOML falhou: {toml_e}. Adicione 'service_account_json' no secrets.toml.")
+        except ValueError as ve:
+            print(f"❌ Erro na validação TOML: {ve}")
         
         # Se todos falharem
         raise Exception(
             f"❌ Falha total no carregamento de credenciais. Erro principal: {error_msg}\n"
             f"💡 1. Verifique permissões IAM: 'Secret Manager Secret Accessor' no projeto {project_numeric}.\n"
-            f"💡 2. Em prod: Adicione 'service_account_json' no secrets.toml com o JSON da SA.\n"
+            f"💡 2. Em prod: Adicione 'service_account_json' no secrets.toml com JSON válido (verifique private_key PEM).\n"
             f"💡 3. Teste CLI: gcloud secrets versions access latest --secret=DocumentAiTeste --project=marcaai-469014\n"
-            f"💡 4. Se timeout persistir, use endpoint regional no client (ex: us-secretmanager.googleapis.com)."
-        )
-     
-    """Carrega credenciais do Secret Manager com fallback para arquivo local."""
-    # Usa variáveis globais de secrets.toml
-    project_numeric = PROJECT_ID_NUMERIC
-    project_string = PROJECT_ID_STRING
-    print(f"🔍 Projeto Numérico (para API): {project_numeric}")
-    print(f"🔍 Projeto String (para SA JSON): {project_string}")
-    # Tenta Secret Manager primeiro (path usa numeric)
-    try:
-        client = secretmanager.SecretManagerServiceClient()
-        name = f"projects/{project_numeric}/secrets/DocumentAiTeste/versions/latest"  # Path correto com numeric
-        print(f"🔍 Tentando acessar secret: {name}")
-        response = client.access_secret_version(request={"name": name})
-        credentials_info = json.loads(response.payload.data.decode("UTF-8"))
-        
-        # Validação CORRIGIDA: Compara com Project ID string (não numeric)
-        if credentials_info.get("project_id") != project_string:
-            raise ValueError(
-                f"❌ Mismatch de Project ID no secret! JSON tem '{credentials_info.get('project_id')}', "
-                f"mas esperado: '{project_string}'. Verifique o JSON da SA."
-            )
-        
-        print("✅ Credenciais carregadas do Secret Manager com sucesso (Project ID validado).")
-        return credentials_info
-    except Exception as e:
-        print(f"⚠️ Erro ao carregar do Secret Manager: {e}. Tentando fallback para arquivo local.")
-        
-        # Fallback: Usa GOOGLE_APPLICATION_CREDENTIALS de secrets.toml
-        json_path = GOOGLE_APPLICATION_CREDENTIALS
-        if json_path and os.path.exists(json_path):
-            try:
-                with open(json_path, "r") as f:
-                    credentials_info = json.load(f)
-                # Validação corrigida no fallback
-                if credentials_info.get("project_id") != project_string:
-                    raise ValueError(
-                        f"❌ Mismatch de Project ID no fallback JSON! Tem '{credentials_info.get('project_id')}', "
-                        f"esperado: '{project_string}'."
-                    )
-                print(f"✅ Credenciais carregadas do arquivo local: {json_path} (Project ID validado).")
-                return credentials_info
-            except Exception as fallback_e:
-                print(f"❌ Erro no fallback local: {fallback_e}")
-        else:
-            print(f"❌ Arquivo de fallback não encontrado: {json_path}")
-        
-        raise Exception(
-            f"❌ Falha total no carregamento de credenciais. Erro principal: {e}\n"
-            f"💡 Verifique: Secret 'DocumentAiTeste' no projeto {project_numeric}, ou arquivo local em {json_path}."
+            f"💡 4. Debug: Verifique logs para 'Private key starts with' – deve mostrar '-----BEGIN PRIVATE KEY-----'."
         )
 
 # Estado de sessão (inicia cronômetro e login)
@@ -209,8 +172,6 @@ def login():
         f"- Email: `{TEST_EMAIL}`\n"
         f"- Senha: `{TEST_PASSWORD}`\n"
         f"- Limite: {TEST_USAGE_LIMIT} processamentos por mês (contador separado)\n\n"
-        "**⚠️ Modo Produção:** Credenciais configuradas via secrets.toml. "
-        "Use autenticação externa (ex: Google OAuth) para segurança. Remova esta exibição em produção."
     )
 
 # Função de logout
@@ -251,7 +212,6 @@ else:
     USAGE_STATE_PATH = ".usage_state_test.json" if is_test else ".usage_state.json"
 
     def _current_month_key() -> str:
-        # CORRIGIDO: Usa datetime.now(UTC) em vez de utcnow() (sem warning)
         return datetime.now(UTC).strftime("%Y-%m")
 
     def _load_usage_state() -> dict:
@@ -382,6 +342,8 @@ else:
                 vertices = getattr(bpoly, "normalized_vertices", None)
                 if vertices and len(vertices) >= 2:
                     x_coords = [v.x * width for v in vertices]
+                                    if vertices and len(vertices) >= 2:
+                    x_coords = [v.x * width for v in vertices]
                     y_coords = [v.y * height for v in vertices]
                 else:
                     abs_vertices = getattr(bpoly, "vertices", None)
@@ -409,7 +371,7 @@ else:
     def process_document_sample(project_id: str, location: str, processor_id: str, file_path: str, mime_type: str):
         """
         Processa documento com Document AI usando endpoint regional.
-        - CORRIGIDO: Usa credenciais do Secret Manager com fallback
+        - CORRIGIDO: Usa credenciais do Secret Manager com fallback + timeout no client
         """
         try:
             credentials_info = get_credentials()
@@ -424,7 +386,10 @@ else:
 
         client = DocumentProcessorServiceClient(
             credentials=credentials,
-            client_options={"api_endpoint": f"{location}-documentai.googleapis.com"}
+            client_options={
+                "api_endpoint": f"{location}-documentai.googleapis.com",
+                "timeout": 120.0  # Timeout maior para OCR em prod (evita timeouts longos)
+            }
         )
 
         name = f"projects/{project_id}/locations/{location}/processors/{processor_id}"
